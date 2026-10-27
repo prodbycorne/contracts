@@ -1,838 +1,140 @@
-```
-  ███████╗ ██████╗ ██╗  ██╗
-  ██╔════╝██╔═══██╗██║  ██║
-  ███████╗██║   ██║███████║
-  ╚════██║██║   ██║╚════██║
-  ███████║╚██████╔╝     ██║
-  ╚══════╝ ╚═════╝      ╚═╝
-           · m a r k e t ·
+# StellarPOS Contracts
 
-   Perpetuals Exchange on Stellar / Soroban
-```
+Soroban smart contracts for StellarPOS, a point-of-sale system for merchants
+who accept payment on the Stellar network.
 
----
+[![CI](https://github.com/StellarPOS-App/contracts/actions/workflows/ci.yml/badge.svg)](https://github.com/StellarPOS-App/contracts/actions/workflows/ci.yml)
+![soroban-sdk](https://img.shields.io/badge/soroban--sdk-27.0.6-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-SO4.market is a decentralised perpetuals and spot exchange built on [Stellar](https://stellar.org) using [Soroban](https://soroban.stellar.org) smart contracts (SDK 25, Rust).
+This repository is one of three:
 
-The protocol implements an isolated-market LP model with two-step keeper execution, dynamic funding rates, borrowing fees, price impact curves, auto-deleveraging, and on-chain liquidations — all adapted faithfully to Soroban's execution environment.
-
----
-
-## Architecture
-
-```
-ExchangeRouter  ──► DepositHandler    ──► (mint LP tokens, update pool)
-                ──► WithdrawalHandler ──► (burn LP tokens, return collateral)
-                ──► OrderHandler      ──► IncreasePositionUtils
-                                      ──► DecreasePositionUtils
-                                      ──► SwapUtils
-                ──► LiquidationHandler
-                ──► AdlHandler
-
-All handlers read/write ──► DataStore  (universal key-value store)
-All handlers price via  ──► Oracle     (keeper-fed min/max price pairs)
-All handlers check      ──► RoleStore  (role-based access control)
-
-MarketFactory  ──► deploy MarketToken (SEP-41 LP) + register in DataStore
-Reader         ──► stateless views over DataStore (no writes)
-```
-
-### Contract Map
-
-| Contract | Description |
+| Repository | What it is |
 |---|---|
-| `data_store` | Universal typed key-value store. All protocol state lives here. |
-| `role_store` | Role-based access control — CONTROLLER, MARKET_KEEPER, ORDER_KEEPER, etc. |
-| `oracle` | Keeper-fed price store. Prices expire per ledger. Ed25519-verified. |
-| `market_token` | SEP-41 LP token deployed per market by `market_factory`. |
-| `market_factory` | Deterministically deploys `market_token` instances and registers markets. |
-| `deposit_vault` | Holds long/short tokens between deposit creation and keeper execution. |
-| `deposit_handler` | Two-step deposit lifecycle: create → (keeper) execute / cancel. |
-| `withdrawal_vault` | Holds LP tokens between withdrawal creation and keeper execution. |
-| `withdrawal_handler` | Two-step withdrawal lifecycle: create → (keeper) execute / cancel. |
-| `order_vault` | Holds collateral for pending orders. |
-| `order_handler` | Full order lifecycle with routing by `OrderType` to position/swap utils. |
-| `liquidation_handler` | Force-closes under-collateralised positions (LIQUIDATION_KEEPER). |
-| `adl_handler` | Auto-deleverages profitable positions when pool PnL exceeds threshold. |
-| `fee_handler` | Claims accumulated protocol fees and user funding fee credits. |
-| `referral_storage` | On-chain referral code registry with tier-based rebate/discount config. |
-| `reader` | Read-only aggregate views: positions, markets, OI, funding, liquidation checks. |
-| `exchange_router` | Single user entry point. Supports multicall for atomic multi-step actions. |
+| [`contracts`](https://github.com/StellarPOS-App/contracts) (this repo) | On-chain settlement, loyalty, treasury and escrow |
+| [`backend`](https://github.com/StellarPOS-App/backend) | REST + WebSocket API: catalog, sales, checkout, payment matching |
+| [`surface`](https://github.com/StellarPOS-App/surface) | The point-of-sale web app cashiers and managers use |
 
-### Shared Libraries
+## The contracts
 
-| Crate | Description |
-|---|---|
-| `libs/types` | All shared structs: `MarketProps`, `PositionProps`, `OrderProps`, `PriceProps`, `PositionFees`, etc. |
-| `libs/math` | `FLOAT_PRECISION` (10³⁰), `TOKEN_PRECISION` (10⁷), `mul_div_wide` (I256), `pow_factor`, `sqrt_fp`. |
-| `libs/keys` | ~58 deterministic `sha256`-based key derivation functions. |
-| `libs/market_utils` | Pool value, open interest, PnL, funding state, borrowing fees, pool/OI validation. |
-| `libs/position_utils` | Per-position PnL, fee breakdown, funding settlement, leverage validation, liquidation check. |
-| `libs/pricing_utils` | Swap and position price impact, execution price, impact pool management. |
-| `libs/swap_utils` | Single-hop and multi-hop token swaps through market pools. |
-| `libs/increase_position_utils` | Open or increase a long/short position (14-step flow). |
-| `libs/decrease_position_utils` | Partial or full position close with PnL settlement (14-step flow). |
+| Crate | Purpose | Key entry points |
+|---|---|---|
+| [`merchant-registry`](contracts/merchant-registry/src/lib.rs) | Who may get paid, where funds settle, which assets each merchant takes | `register`, `approve`, `suspend`, `accepts`, `settlement_of` |
+| [`payment-processor`](contracts/payment-processor/src/lib.rs) | Atomic sale settlement: fee to treasury, net to merchant, one payment per order | `pay`, `pay_batch`, `refund`, `payment_for_order`, `quote` |
+| [`loyalty-program`](contracts/loyalty-program/src/lib.rs) | Per-merchant points with automatic Bronze/Silver/Gold/Platinum tiers | `enroll`, `accrue`, `redeem`, `get_account` |
+| [`treasury`](contracts/treasury/src/lib.rs) | M-of-N multisig that holds protocol fees and can put idle funds into approved yield vaults | `propose`, `approve`, `execute`, `freeze`, `vaults` |
+| [`escrow-service`](contracts/escrow-service/src/lib.rs) | Held payments for deliveries and pre-orders, with dispute resolution | `create`, `release`, `claim`, `raise_dispute`, `resolve`, `resolve_by_default` |
+| [`payment-stream`](contracts/payment-stream/src/lib.rs) | Per-second payment streams for subscriptions, rent and payroll; cancel splits earned and unearned exactly | `create`, `withdraw`, `cancel`, `available` |
+| [`shared`](contracts/shared/src/lib.rs) | Library, not deployed: basis-point fee math and storage TTL helpers | `bps_of`, `split_fee`, `extend_*` |
 
----
+### How a sale settles
 
-## Key Financial Mechanics
-
-### Price Precision
-- All USD values use `FLOAT_PRECISION = 10^30`.
-- All token amounts use `TOKEN_PRECISION = 10^7` (Stellar's 7-decimal standard).
-- Wide multiplication via Soroban's `I256` host functions prevents overflow.
-
-### LP Minting
-```
-mint_amount        = deposit_usd × TOKEN_PRECISION / market_token_price
-market_token_price = pool_value / lp_supply  (1 USD on first deposit)
+```mermaid
+sequenceDiagram
+    participant C as Customer wallet
+    participant P as payment-processor
+    participant R as merchant-registry
+    participant T as Token (SAC)
+    participant L as loyalty-program
+    C->>P: pay(payer, merchant, asset, amount, order_ref)
+    P->>R: accepts(merchant, asset)?
+    R-->>P: true
+    P->>R: settlement_of(merchant)
+    P->>T: transfer(payer -> settlement, net)
+    P->>T: transfer(payer -> treasury, fee)
+    P->>L: accrue(processor, merchant, payer, amount)
+    P-->>C: payment id (event: payment_settled)
 ```
 
-### Price Impact
-```
-initial_diff = |sideA_usd - sideB_usd|
-next_diff    = |after_delta|
-positive_impact (improves balance) → paid from impact pool, capped by pool balance
-negative_impact (worsens balance)  → paid into impact pool
-impact = factor × (diff ^ exponent)
-```
+All transfers happen inside one transaction, so either the whole sale settles
+or nothing moves. The processor never holds customer funds, and the
+`(merchant, order_ref)` pair is unique, so a retried checkout cannot charge
+twice.
 
-### Funding Rate
-```
-funding_factor_per_second = funding_factor × (|long_oi - short_oi| / total_oi) ^ exponent
-funding_amount_per_size  += factor_per_second × dt × index_token_price
-```
+### Design rules
 
-### Borrowing Fee
-```
-cumulative_borrowing_factor += borrowing_factor × dt × (open_interest / pool_amount)
-position_borrow_fee          = (cumulative_factor_now - factor_at_open) × size_in_tokens
-```
+These hold across every contract:
 
-### Liquidation
-```
-remaining   = collateral_usd - borrowing_fees - funding_fees + unrealised_pnl
-liquidatable when: remaining < min_collateral_factor × position_size_usd
-```
+- **Typed errors, no panics on user input.** Each contract has a
+  `#[contracterror]` enum. Clients get a stable numeric code for every
+  rejection.
+- **Events for every state change**, defined with `#[contractevent]`, so the
+  backend and indexers can follow everything without polling storage.
+- **Emergency pause.** Registry, processor, loyalty and escrow can be paused
+  by their admin. Escrow refunds still work while paused, because returning
+  funds to a buyer is always safe. The treasury uses a multisig freeze
+  instead.
+- **Checked arithmetic.** Fee and split math goes through `shared::bps_of`,
+  which returns `None` on overflow or on more than 100%.
+- **TTL management.** Every read or write of a long-lived record extends its
+  TTL, so active data is never archived.
 
----
+More detail on each contract, including state machines and storage layout, is
+in [docs/architecture.md](docs/architecture.md).
 
-## Prerequisites
+## Getting started
 
-### 1. Rust toolchain
+### Prerequisites
+
+- Rust stable with the `wasm32v1-none` target (pinned in
+  [`rust-toolchain.toml`](rust-toolchain.toml), installed automatically by
+  rustup)
+- [Stellar CLI](https://developers.stellar.org/docs/tools/cli) 23 or newer,
+  for building optimized wasm and deploying
+
+### Build and test
 
 ```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/StellarPOS-App/contracts.git
+cd contracts
 
-# Add the wasm target (required for Soroban contract compilation)
-rustup target add wasm32-unknown-unknown
+make test      # 63 tests across all crates
+make check     # rustfmt + clippy -D warnings + tests (what CI runs)
+make build     # optimized wasm in target/wasm32v1-none/release/
+make sizes     # wasm sizes, all well under the 64 KB limit
+make verify    # check a deployment runs exactly this source (NETWORK=testnet)
 ```
 
-### 2. Stellar CLI
+### Deploy to testnet
 
 ```bash
-# Install from crates.io with wasm optimiser enabled
-cargo install --locked stellar-cli --features opt
-
-# Verify
-stellar --version
+make deploy                      # NETWORK=testnet, FEE_BPS=100 by default
+NETWORK=testnet FEE_BPS=250 make deploy
 ```
 
-### 3. Docker (optional — required for local node)
-
-[Install Docker Desktop](https://docs.docker.com/get-docker/) if you want to run a fully local Stellar node instead of using testnet.
-
----
-
-## Keys & Identity
-
-Every transaction on Stellar must be signed by a key pair. The CLI manages keys in a local keystore (`~/.config/stellar/identity/`).
-
-### Generate a new key pair
-
-```bash
-# Generate and store a key named "alice" globally (persists across projects)
-stellar keys generate --global alice --network testnet
-
-# Print the public address for "alice"
-stellar keys address alice
-
-# Print the secret key (keep this safe — do not commit it)
-stellar keys show alice
-```
-
-### Import an existing secret key
-
-```bash
-stellar keys add alice --secret-key
-# You will be prompted to paste the secret key (starts with S...)
-```
-
-### List all stored keys
-
-```bash
-stellar keys ls
-```
-
-### Fund a key on testnet (Friendbot airdrop)
-
-```bash
-# Requests 10,000 XLM from the testnet Friendbot faucet
-stellar keys fund alice --network testnet
-
-# Verify the balance
-stellar contract invoke \
-  --id CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
-  --source alice --network testnet \
-  -- balance --id $(stellar keys address alice)
-```
-
-### Configure the network shorthand (optional)
-
-```bash
-# "testnet" is pre-configured. To add a custom RPC:
-stellar network add localnet \
-  --rpc-url http://localhost:8000/soroban/rpc \
-  --network-passphrase "Standalone Network ; February 2017"
-```
-
----
-
-## Build
-
-### Type-check only (fastest — no wasm output)
-
-```bash
-cargo check --workspace
-```
-
-### Lint with Clippy
-
-```bash
-cargo clippy --workspace -- -D warnings
-```
-
-### Build all contracts to wasm
-
-```bash
-stellar contract build
-```
-
-Output: `target/wasm32-unknown-unknown/release/<contract_name>.wasm`
-
-> The `stellar contract build` command compiles every `cdylib` crate in the workspace automatically.
-
-### Build a single contract
-
-```bash
-stellar contract build --package data-store
-stellar contract build --package role-store
-stellar contract build --package oracle
-stellar contract build --package market-factory
-stellar contract build --package deposit-handler
-stellar contract build --package withdrawal-handler
-stellar contract build --package order-handler
-stellar contract build --package liquidation-handler
-stellar contract build --package adl-handler
-stellar contract build --package fee-handler
-stellar contract build --package referral-storage
-stellar contract build --package reader
-stellar contract build --package exchange-router
-```
-
-### Optimised release build
-
-```bash
-# Adds wasm-opt shrinking pass — use this before uploading to mainnet
-stellar contract build --release
-```
-
-### Inspect a compiled wasm
-
-```bash
-# Print all exported function names
-stellar contract inspect \
-  --wasm target/wasm32-unknown-unknown/release/order_handler.wasm
-```
-
----
-
-## Test
-
-All tests run inside the Soroban sandbox (no network required). The SDK provides a full mock host environment with storage, auth, and events.
-
-### Run the full test suite
-
-```bash
-cargo test --workspace
-```
-
-### Test a specific crate
-
-```bash
-# Shared libraries
-cargo test -p gmx-math
-cargo test -p gmx-keys
-cargo test -p gmx-market-utils
-cargo test -p gmx-position-utils
-cargo test -p gmx-pricing-utils
-cargo test -p gmx-swap-utils
-
-# Core contracts
-cargo test -p data-store
-cargo test -p role-store
-cargo test -p oracle
-
-# Handler contracts
-cargo test -p deposit-handler
-cargo test -p withdrawal-handler
-cargo test -p order-handler
-```
-
-### Run a single test by name
-
-```bash
-cargo test -p gmx-market-utils apply_delta_to_pool_amount_works
-cargo test -p oracle set_and_get_price
-cargo test -p deposit-handler create_and_execute_deposit
-```
-
-### Show test output (disable output capture)
-
-```bash
-cargo test --workspace -- --nocapture
-```
-
-### Run tests with a filter pattern
-
-```bash
-# All tests whose name contains "deposit"
-cargo test --workspace deposit
-```
-
-### Check test coverage (requires cargo-llvm-cov)
-
-```bash
-cargo install cargo-llvm-cov
-cargo llvm-cov --workspace --open
-```
-
----
-
-## Local Node
-
-For end-to-end integration testing without using public testnet.
-
-### Start a local Stellar node
-
-```bash
-stellar network start local
-```
-
-This starts a Docker container with a local Stellar + Soroban node on `http://localhost:8000`.
-
-### Generate and fund a local key
-
-```bash
-stellar keys generate --global dev --network local
-stellar keys fund dev --network local
-```
-
-### Stop the local node
-
-```bash
-stellar network stop local
-```
-
-All state is ephemeral — restarting clears everything.
-
----
-
-## Makefile
-
-A `Makefile` is provided for the most common workflows.
-
-| Target | Description |
-|---|---|
-| `make build` | Compile all contracts to wasm via `stellar contract build` |
-| `make check` | Type-check without producing wasm (`cargo check`) |
-| `make lint` | Run Clippy with warnings as errors |
-| `make test` | Run the full Soroban sandbox test suite |
-| `make deploy-all` | Deploy the full protocol graph to **testnet** (default) |
-| `make deploy-contract` | Deploy one standalone contract Wasm for debugging |
-| `make upgrade-contract` | Upload new Wasm and upgrade one existing deployed contract |
-| `make upgrade-all` | Upgrade every deployed protocol contract listed in `UPGRADE_CONTRACTS` |
-| `make deploy-mainnet` | Deploy the full protocol graph to **mainnet** |
-| `make clean` | Remove `target/` and `.deployed/` |
-
-### Deploy and upgrade
-
-```bash
-# Full testnet deployment (default network)
-make deploy-all
-
-# Testnet with a different key name
-make deploy-all SOURCE=mykey
-
-# Mainnet
-make deploy-mainnet SOURCE=mykey
-
-# Override both
-make deploy-all NETWORK=mainnet SOURCE=mykey
-
-# Deploy one standalone contract Wasm for debugging
-make deploy-contract CONTRACT=reader NETWORK=testnet SOURCE=mykey
-
-# Upgrade one deployed contract in-place
-make upgrade-contract CONTRACT=deposit_handler NETWORK=testnet SOURCE=mykey
-
-# Upgrade every deployed protocol contract listed in UPGRADE_CONTRACTS
-make upgrade-all NETWORK=testnet SOURCE=mykey
-```
-
-`SOURCE` must match a key stored in your local Stellar keystore (see [Keys & Identity](#keys--identity) above).
-
-The full deploy script (`scripts/deploy.sh`) handles the full sequence automatically:
-builds → uploads wasm blobs → deploys each contract → calls `initialize` → grants `CONTROLLER` roles → prints a summary table → saves all addresses to `.deployed/<NETWORK>.env`.
-
-If `.deployed/<NETWORK>.env` already exists, `make deploy-all` refuses to create
-a second protocol graph and prints the appropriate upgrade commands. To
-intentionally create a fresh deployment, use:
-
-```bash
-make deploy-force NETWORK=testnet SOURCE=mykey
-```
-
-`deploy-contract` is deliberately standalone: it deploys one Wasm and prints the
-new contract address, but it does not update `.deployed/<NETWORK>.env` or wire
-the contract into the current protocol deployment.
-
-Upgrade commands require the deployed contract to already expose an admin-gated
-`upgrade(env, new_wasm_hash)` function that calls
-`env.deployer().update_current_contract_wasm(new_wasm_hash)`.
-
-### Deployed address file
-
-After a successful deploy, addresses are written to `.deployed/testnet.env` (or `mainnet.env`):
-
-```bash
-# Source the file to load all contract addresses into your shell
-source .deployed/testnet.env
-echo $EXCHANGE_ROUTER
-```
-
----
-
-## Deploy to Testnet (manual)
-
-The steps below are the manual equivalent of `make deploy`, useful for debugging individual steps or partial re-deploys.
-
-Contracts must be deployed in dependency order: stores first, then handlers that depend on them, then the router last. The sequence below captures the full stack.
-
-### Step 1 — Build wasm blobs
-
-```bash
-stellar contract build
-```
-
-### Step 2 — Upload wasm blobs
-
-Each `upload` uploads bytecode and returns a `WASM_HASH`. Record each one — the hash is stable as long as the code doesn't change, so you only need to re-upload after rebuilding.
-
-```bash
-ROLE_STORE_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/role_store.wasm \
-  --source alice --network testnet)
-
-DATA_STORE_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/data_store.wasm \
-  --source alice --network testnet)
-
-ORACLE_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/oracle.wasm \
-  --source alice --network testnet)
-
-MARKET_TOKEN_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/market_token.wasm \
-  --source alice --network testnet)
-
-MARKET_FACTORY_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/market_factory.wasm \
-  --source alice --network testnet)
-
-DEPOSIT_VAULT_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/deposit_vault.wasm \
-  --source alice --network testnet)
-
-DEPOSIT_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/deposit_handler.wasm \
-  --source alice --network testnet)
-
-WITHDRAWAL_VAULT_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/withdrawal_vault.wasm \
-  --source alice --network testnet)
-
-WITHDRAWAL_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/withdrawal_handler.wasm \
-  --source alice --network testnet)
-
-ORDER_VAULT_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/order_vault.wasm \
-  --source alice --network testnet)
-
-ORDER_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/order_handler.wasm \
-  --source alice --network testnet)
-
-LIQUIDATION_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/liquidation_handler.wasm \
-  --source alice --network testnet)
-
-ADL_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/adl_handler.wasm \
-  --source alice --network testnet)
-
-FEE_HANDLER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/fee_handler.wasm \
-  --source alice --network testnet)
-
-REFERRAL_STORAGE_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/referral_storage.wasm \
-  --source alice --network testnet)
-
-READER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/reader.wasm \
-  --source alice --network testnet)
-
-EXCHANGE_ROUTER_HASH=$(stellar contract upload \
-  --wasm target/wasm32-unknown-unknown/release/exchange_router.wasm \
-  --source alice --network testnet)
-```
-
-### Step 3 — Capture your admin address
-
-```bash
-ALICE=$(stellar keys address alice)
-```
-
-### Step 4 — Deploy core infrastructure
-
-```bash
-ROLE_STORE=$(stellar contract deploy \
-  --wasm-hash $ROLE_STORE_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE)
-
-DATA_STORE=$(stellar contract deploy \
-  --wasm-hash $DATA_STORE_HASH \
-  --source alice --network testnet \
-  -- initialize --role_store $ROLE_STORE)
-
-ORACLE=$(stellar contract deploy \
-  --wasm-hash $ORACLE_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE --role_store $ROLE_STORE --data_store $DATA_STORE)
-```
-
-### Step 5 — Deploy market factory
-
-```bash
-MARKET_FACTORY=$(stellar contract deploy \
-  --wasm-hash $MARKET_FACTORY_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --market_token_wasm_hash $MARKET_TOKEN_HASH)
-```
-
-### Step 6 — Deploy vaults and handlers
-
-```bash
-DEPOSIT_VAULT=$(stellar contract deploy \
-  --wasm-hash $DEPOSIT_VAULT_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE --role_store $ROLE_STORE)
-
-DEPOSIT_HANDLER=$(stellar contract deploy \
-  --wasm-hash $DEPOSIT_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --deposit_vault $DEPOSIT_VAULT)
-
-WITHDRAWAL_VAULT=$(stellar contract deploy \
-  --wasm-hash $WITHDRAWAL_VAULT_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE --role_store $ROLE_STORE)
-
-WITHDRAWAL_HANDLER=$(stellar contract deploy \
-  --wasm-hash $WITHDRAWAL_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --withdrawal_vault $WITHDRAWAL_VAULT)
-
-ORDER_VAULT=$(stellar contract deploy \
-  --wasm-hash $ORDER_VAULT_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE --role_store $ROLE_STORE)
-
-ORDER_HANDLER=$(stellar contract deploy \
-  --wasm-hash $ORDER_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --order_vault $ORDER_VAULT)
-```
-
-### Step 7 — Deploy risk handlers and periphery
-
-```bash
-LIQUIDATION_HANDLER=$(stellar contract deploy \
-  --wasm-hash $LIQUIDATION_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --order_handler $ORDER_HANDLER)
-
-ADL_HANDLER=$(stellar contract deploy \
-  --wasm-hash $ADL_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --order_handler $ORDER_HANDLER)
-
-FEE_HANDLER=$(stellar contract deploy \
-  --wasm-hash $FEE_HANDLER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE)
-
-REFERRAL_STORAGE=$(stellar contract deploy \
-  --wasm-hash $REFERRAL_STORAGE_HASH \
-  --source alice --network testnet \
-  -- initialize --admin $ALICE)
-
-# Reader is stateless — no initialize call needed
-READER=$(stellar contract deploy \
-  --wasm-hash $READER_HASH \
-  --source alice --network testnet)
-```
-
-### Step 8 — Deploy exchange router
-
-```bash
-EXCHANGE_ROUTER=$(stellar contract deploy \
-  --wasm-hash $EXCHANGE_ROUTER_HASH \
-  --source alice --network testnet \
-  -- initialize \
-     --admin $ALICE \
-     --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --deposit_handler $DEPOSIT_HANDLER \
-     --withdrawal_handler $WITHDRAWAL_HANDLER \
-     --order_handler $ORDER_HANDLER \
-     --fee_handler $FEE_HANDLER)
-```
-
-### Step 9 — Grant CONTROLLER role to all handlers
-
-Handlers need `CONTROLLER` to write to `data_store` and withdraw from market pools:
-
-```bash
-for CONTRACT in \
-  $DEPOSIT_HANDLER \
-  $WITHDRAWAL_HANDLER \
-  $ORDER_HANDLER \
-  $LIQUIDATION_HANDLER \
-  $ADL_HANDLER \
-  $FEE_HANDLER \
-  $EXCHANGE_ROUTER
-do
-  stellar contract invoke \
-    --id $ROLE_STORE \
-    --source alice --network testnet \
-    -- grant_role --account $CONTRACT --role CONTROLLER
-done
-```
-
-### Step 10 — Grant keeper roles (optional, for a test keeper account)
-
-```bash
-# Generate a dedicated keeper key
-stellar keys generate --global keeper --network testnet
-stellar keys fund keeper --network testnet
-KEEPER=$(stellar keys address keeper)
-
-# Market keeper (price feeds, execute deposits/withdrawals)
-stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
-  -- grant_role --account $KEEPER --role MARKET_KEEPER
-
-# Order keeper (execute pending orders)
-stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
-  -- grant_role --account $KEEPER --role ORDER_KEEPER
-
-# Liquidation keeper
-stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
-  -- grant_role --account $KEEPER --role LIQUIDATION_KEEPER
-
-# ADL keeper
-stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
-  -- grant_role --account $KEEPER --role ADL_KEEPER
-
-# Fee keeper (sweep protocol fees)
-stellar contract invoke --id $ROLE_STORE --source alice --network testnet \
-  -- grant_role --account $KEEPER --role FEE_KEEPER
-```
-
----
-
-## Invoke Contracts (Examples)
-
-### Create a market
-```bash
-stellar contract invoke --id $MARKET_FACTORY \
-  --source alice --network testnet \
-  -- create_market \
-     --index_token <ETH_TOKEN_ADDRESS> \
-     --long_token  <WETH_TOKEN_ADDRESS> \
-     --short_token <USDC_TOKEN_ADDRESS>
-```
-
-### Read pool value
-```bash
-stellar contract invoke --id <READER_ADDRESS> \
-  --source alice --network testnet \
-  -- get_market_pool_value_info \
-     --data_store $DATA_STORE \
-     --oracle $ORACLE \
-     --market_token <MARKET_TOKEN_ADDRESS> \
-     --maximize false
-```
-
-### Open a long position via exchange router
-```bash
-stellar contract invoke --id $EXCHANGE_ROUTER \
-  --source alice --network testnet \
-  -- create_order \
-     --market <MARKET_TOKEN_ADDRESS> \
-     --receiver <ALICE_ADDRESS> \
-     --initial_collateral_token <USDC_ADDRESS> \
-     --size_delta_usd 1000000000000000000000000000000000 \
-     --collateral_delta_amount 1000000000 \
-     --trigger_price 0 \
-     --acceptable_price 0 \
-     --execution_fee 100000 \
-     --min_output_amount 0 \
-     --order_type MarketIncrease \
-     --is_long true
-```
-
----
-
-## Project Structure
+[`scripts/deploy.sh`](scripts/deploy.sh) creates and funds a deployer
+identity if needed, deploys all five contracts, initializes them, connects
+the loyalty program to the processor, and writes every contract ID to
+`deployments/<network>.json`. See [docs/deployment.md](docs/deployment.md)
+for the post-deploy checklist (multisig rotation, merchant onboarding) and
+example `stellar contract invoke` calls.
+
+## Project layout
 
 ```
 contracts/
-├── Cargo.toml                    # workspace root
-├── README.md                     # this file
-│
-├── contracts/
-│   ├── data_store/               # universal KV store
-│   ├── role_store/               # access control
-│   ├── market_token/             # SEP-41 LP token
-│   ├── market_factory/           # deterministic market deploy
-│   ├── oracle/                   # keeper-fed prices (ed25519)
-│   ├── deposit_vault/            # token custody for deposits
-│   ├── deposit_handler/          # deposit lifecycle
-│   ├── withdrawal_vault/         # LP custody for withdrawals
-│   ├── withdrawal_handler/       # withdrawal lifecycle
-│   ├── order_vault/              # collateral custody for orders
-│   ├── order_handler/            # full order lifecycle
-│   ├── liquidation_handler/      # force-close underwater positions
-│   ├── adl_handler/              # auto-deleverage profitable positions
-│   ├── fee_handler/              # fee distribution and claims
-│   ├── referral_storage/         # referral codes and tier rebates
-│   ├── reader/                   # stateless aggregate views
-│   └── exchange_router/          # user entry point, multicall
-│
-└── libs/
-    ├── types/                    # shared #[contracttype] structs
-    ├── math/                     # precision constants and safe math
-    ├── keys/                     # sha256 key derivation (~58 functions)
-    ├── market_utils/             # pool, OI, funding, borrowing math
-    ├── position_utils/           # per-position PnL, fees, validation
-    ├── pricing_utils/            # price impact, execution price
-    ├── swap_utils/               # single and multi-hop swaps
-    ├── increase_position_utils/  # position open/increase logic
-    └── decrease_position_utils/  # position close/decrease logic
+  shared/               fee math and TTL helpers (rlib)
+  merchant-registry/
+  payment-processor/
+  loyalty-program/
+  treasury/
+  escrow-service/
+    src/dispute.rs      dispute reasons, role rules, default rulings
+    tests/              end-to-end dispute scenarios
+docs/                   architecture and deployment guides
+scripts/deploy.sh       deploy + initialize + wire
+deployments/            contract IDs per network (written by deploy.sh)
 ```
-
----
-
-## EVM → Soroban Reference
-
-| Solidity / EVM | Soroban / Rust |
-|---|---|
-| `bytes32` | `BytesN<32>` |
-| `keccak256(abi.encode(...))` | `env.crypto().sha256(bytes)` |
-| `mapping(bytes32 => uint256)` | `env.storage().persistent().set(key, val)` |
-| `uint256` | `u128` (or `U256` for overflow-sensitive paths) |
-| `int256` | `i128` (or `I256`) |
-| `address` | `Address` |
-| `block.timestamp` | `env.ledger().timestamp()` |
-| `ERC-20` | SEP-41 via `soroban_sdk::token::Client` |
-| `CREATE2` | `env.deployer().with_address(deployer, salt).deploy_v2(wasm, args)` |
-| `emit Event(...)` | `env.events().publish((Symbol,), data)` |
-| `msg.sender` | passed as `Address` arg + `caller.require_auth()` |
-| `onlyRole` modifier | `role_store.has_role(caller, role)` cross-contract call |
-| `ReentrancyGuard` | not needed — Soroban execution is atomic per transaction |
-
----
-
-## Implementation Status
-
-| Phase | Description | Status |
-|---|---|---|
-| 1 | Foundation — data_store, role_store, types, math, keys | ✅ Complete |
-| 2 | Market infrastructure — market_token, market_factory, market_utils | ✅ Complete |
-| 3 | Oracle — keeper-fed prices, ed25519 verification | ✅ Complete |
-| 4 | Liquidity — deposit and withdrawal vaults + handlers | ✅ Complete |
-| 5 | Trading — order vault, position utils, order handler | ✅ Complete |
-| 6 | Risk — liquidation handler, ADL handler | ✅ Complete |
-| 7 | Periphery — fee handler, referral storage, reader | ✅ Complete |
-| 8 | Router — exchange router with multicall | ✅ Complete |
-
----
 
 ## Contributing
 
-SO4.market is being built in the open. All eight implementation phases are complete — the full protocol logic is live in Rust/Soroban. See the issue tracker for integration tests, optimisation tasks, and frontend work.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment and upgrade workflow rules.
-
----
+Read [CONTRIBUTING.md](CONTRIBUTING.md). In short: open an issue first for
+anything non-trivial, keep pull requests focused, and run `make check`
+before pushing. Security issues go through [SECURITY.md](SECURITY.md), never
+public issues.
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
+## Dynamic Contract Addresses\n\n**Security note (issue #177):** Contract addresses must never be hardcoded in initialization logic. Use constructor arguments or a registry lookup so the same bytecode deploys to testnet and mainnet without source changes.
